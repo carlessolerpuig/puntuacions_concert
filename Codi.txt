@@ -1,0 +1,566 @@
+import React, { useEffect, useMemo, useState } from "react";
+
+// Versió mòbil-first amb 3 pantalles:
+// - Puntuació (inicial) amb botó "Configuració" (la navegació és dins de cada cançó)
+// - Login (Usuari/Password) -> només "admin" / "admin"
+// - Configuració (afegir/eliminar cançons i marcar si tenen solista)
+
+const CRITERIS = [
+  { key: "interes", label: "Interès de la cançó" },
+  { key: "cantaires", label: "Qualitat dels cantaires" },
+  { key: "coreografia", label: "Qualitat de la coreografia" },
+  { key: "solistes", label: "Qualitat dels solistes" },
+];
+
+const LS_KEY = "concert_ratings_v4";
+
+function uid() {
+  return Math.random().toString(16).slice(2) + Date.now().toString(16);
+}
+
+function clamp1to5(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(5, Math.max(1, n));
+}
+
+function avg(nums) {
+  const xs = nums.filter((v) => Number.isFinite(v));
+  if (!xs.length) return null;
+  return xs.reduce((a, b) => a + b, 0) / xs.length;
+}
+
+function criteriaForSong(song) {
+  const hasSolo = !!song?.hasSolist;
+  return hasSolo ? CRITERIS : CRITERIS.filter((c) => c.key !== "solistes");
+}
+
+function safeGetLS() {
+  try {
+    if (typeof window === "undefined") return null;
+    return window.localStorage?.getItem(LS_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function safeSetLS(value) {
+  try {
+    if (typeof window === "undefined") return;
+    window.localStorage?.setItem(LS_KEY, value);
+  } catch {
+    // ignore
+  }
+}
+
+function safeRemoveLS() {
+  try {
+    if (typeof window === "undefined") return;
+    window.localStorage?.removeItem(LS_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+function Button({ children, onClick, disabled, variant = "secondary" }) {
+  const base =
+    "h-11 px-4 rounded-2xl text-sm font-semibold border transition active:scale-[0.99]";
+  const cls =
+    variant === "primary"
+      ? disabled
+        ? "bg-neutral-200 text-neutral-500 border-neutral-200"
+        : "bg-black text-white border-black"
+      : disabled
+      ? "bg-white text-neutral-400 border-neutral-200"
+      : "bg-white text-black border-neutral-300";
+
+  return (
+    <button type="button" onClick={onClick} disabled={disabled} className={`${base} ${cls}`}>
+      {children}
+    </button>
+  );
+}
+
+function PillButton({ children, onClick, active }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        "h-9 px-3 rounded-full border text-xs font-semibold transition active:scale-[0.99] " +
+        (active ? "bg-black text-white border-black" : "bg-white text-black border-neutral-300")
+      }
+    >
+      {children}
+    </button>
+  );
+}
+
+function RatingButtons({ value, onChange }) {
+  return (
+    <div className="grid grid-cols-5 gap-2">
+      {Array.from({ length: 5 }, (_, i) => i + 1).map((n) => {
+        const active = value === n;
+        return (
+          <button
+            key={n}
+            type="button"
+            onClick={() => onChange(n)}
+            className={
+              "h-12 w-full rounded-full border text-lg font-semibold transition active:scale-[0.98] " +
+              (active
+                ? "bg-black text-white border-black"
+                : "bg-white text-black border-neutral-300")
+            }
+            aria-pressed={active}
+            aria-label={`Puntuació ${n}`}
+          >
+            {n}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function PhoneFrame({ children }) {
+  return (
+    <div className="min-h-screen bg-neutral-100 flex items-center justify-center p-3">
+      <div className="w-full max-w-[430px] h-[100svh] bg-white rounded-[28px] shadow-sm border border-neutral-200 overflow-hidden">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Header({ title, left, right }) {
+  return (
+    <div className="px-4 pt-4 pb-3 border-b border-neutral-200">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-xs text-neutral-600">Puntuació de cançons</div>
+          <div className="text-lg font-semibold truncate">{title}</div>
+        </div>
+        <div className="flex items-center gap-2">
+          {left}
+          {right}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [screen, setScreen] = useState("rate"); // rate | login | config
+
+  const [concertName, setConcertName] = useState("Concert");
+  const [songs, setSongs] = useState([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  // Login
+  const [user, setUser] = useState("");
+  const [pass, setPass] = useState("");
+  const [authError, setAuthError] = useState("");
+
+  // Config inputs
+  const [newTitle, setNewTitle] = useState("");
+  const [newHasSolist, setNewHasSolist] = useState(false);
+  const [bulk, setBulk] = useState("");
+
+  // Load
+  useEffect(() => {
+    const raw = safeGetLS();
+    if (!raw) return;
+    try {
+      const data = JSON.parse(raw);
+      if (typeof data?.concertName === "string") setConcertName(data.concertName);
+      if (Array.isArray(data?.songs)) {
+        // Compatibilitat: si una cançó no té camp hasSolist, el considerem false
+        const normalized = data.songs.map((s) => ({
+          ...s,
+          hasSolist: !!s?.hasSolist,
+          ratings: s?.ratings || {},
+        }));
+        setSongs(normalized);
+      }
+      if (Number.isFinite(data?.currentIndex)) setCurrentIndex(data.currentIndex);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Save
+  useEffect(() => {
+    safeSetLS(
+      JSON.stringify({ concertName, songs, currentIndex, updatedAt: new Date().toISOString() })
+    );
+  }, [concertName, songs, currentIndex]);
+
+  // Keep index in range
+  useEffect(() => {
+    if (!songs.length) {
+      if (currentIndex !== 0) setCurrentIndex(0);
+      return;
+    }
+    if (currentIndex < 0) setCurrentIndex(0);
+    if (currentIndex > songs.length - 1) setCurrentIndex(songs.length - 1);
+  }, [songs, currentIndex]);
+
+  const currentSong = useMemo(() => songs[currentIndex] ?? null, [songs, currentIndex]);
+
+  const setRating = (songId, key, value) => {
+    setSongs((prev) =>
+      prev.map((s) => {
+        if (s.id !== songId) return s;
+        const ratings = { ...(s.ratings || {}) };
+        // Si la cançó no té solista, ignorem qualsevol intent de puntuar "solistes"
+        if (key === "solistes" && !s.hasSolist) return s;
+        ratings[key] = clamp1to5(value);
+        return { ...s, ratings };
+      })
+    );
+  };
+
+  const toggleHasSolist = (songId) => {
+    setSongs((prev) =>
+      prev.map((s) => {
+        if (s.id !== songId) return s;
+        const nextHas = !s.hasSolist;
+        const next = { ...s, hasSolist: nextHas };
+        // Si el desactivem, esborrem la nota de solistes per coherència
+        if (!nextHas && next.ratings?.solistes != null) {
+          const ratings = { ...(next.ratings || {}) };
+          delete ratings.solistes;
+          next.ratings = ratings;
+        }
+        return next;
+      })
+    );
+  };
+
+  const openLogin = () => {
+    setUser("");
+    setPass("");
+    setAuthError("");
+    setScreen("login");
+  };
+
+  const doLogin = () => {
+    const u = (user ?? "").toString().trim();
+    const p = (pass ?? "").toString();
+    const ok = u === "admin" && p === "admin";
+    if (!ok) {
+      setAuthError("Accés denegat. Comprova Usuari i Password.");
+      return;
+    }
+    setAuthError("");
+    setScreen("config");
+  };
+
+  const nextSong = () => {
+    if (!songs.length) return;
+    setCurrentIndex((i) => (i + 1 < songs.length ? i + 1 : i));
+  };
+
+  const prevSong = () => {
+    if (!songs.length) return;
+    setCurrentIndex((i) => (i - 1 >= 0 ? i - 1 : 0));
+  };
+
+  const addSong = () => {
+    const title = newTitle.trim();
+    if (!title) return;
+    const s = { id: uid(), title, hasSolist: !!newHasSolist, ratings: {} };
+    setSongs((prev) => [...prev, s]);
+    setNewTitle("");
+    setNewHasSolist(false);
+  };
+
+  const addBulk = () => {
+    // Split robust: evitem salts de línia dins literals per no trencar el parser
+    const LF = String.fromCharCode(10);
+    const CR = String.fromCharCode(13);
+    const lines = String(bulk ?? "")
+      .split(LF)
+      .map((l) => l.replaceAll(CR, "").trim())
+      .filter(Boolean);
+    if (!lines.length) return;
+    // Per defecte, les cançons enganxades es creen sense solista (es pot activar després)
+    const created = lines.map((title) => ({ id: uid(), title, hasSolist: false, ratings: {} }));
+    setSongs((prev) => [...prev, ...created]);
+    setBulk("");
+  };
+
+  const removeSong = (id) => {
+    setSongs((prev) => prev.filter((s) => s.id !== id));
+  };
+
+  const clearAll = () => {
+    const ok =
+      typeof window !== "undefined"
+        ? window.confirm("Vols esborrar totes les dades guardades?")
+        : false;
+    if (!ok) return;
+    safeRemoveLS();
+    setConcertName("Concert");
+    setSongs([]);
+    setCurrentIndex(0);
+    setScreen("rate");
+  };
+
+  const currentCriteria = useMemo(() => criteriaForSong(currentSong), [currentSong]);
+
+  const currentAvg = useMemo(() => {
+    if (!currentSong) return null;
+    return avg(currentCriteria.map((c) => currentSong.ratings?.[c.key]));
+  }, [currentSong, currentCriteria]);
+
+  return (
+    <PhoneFrame>
+      <div className="h-full flex flex-col">
+        {screen === "rate" ? (
+          <>
+            <Header title={concertName} left={<Button onClick={openLogin}>Configuració</Button>} right={null} />
+
+            <div className="flex-1 overflow-auto px-4 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-xs text-neutral-600">Cançó</div>
+                    <div className="text-xs text-neutral-600">
+                      {songs.length ? `${currentIndex + 1} / ${songs.length}` : "0 / 0"}
+                    </div>
+                  </div>
+                  <div className="text-xl font-semibold leading-tight truncate">
+                    {currentSong ? currentSong.title : "(Cap cançó afegida)"}
+                  </div>
+                </div>
+
+                <div className="text-right">
+                  <div className="text-xs text-neutral-600">Mitjana</div>
+                  <div className="text-2xl font-semibold">{currentAvg == null ? "—" : currentAvg.toFixed(2)}</div>
+                </div>
+              </div>
+
+              {!currentSong ? (
+                <div className="mt-6 rounded-3xl border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-700">
+                  Per començar, entra a <span className="font-semibold">Configuració</span> i afegeix les cançons.
+                </div>
+              ) : (
+                <>
+                  <div className="mt-4 flex items-center justify-between gap-2">
+                    <Button onClick={prevSong} disabled={currentIndex === 0}>
+                      ← Anterior
+                    </Button>
+                    <Button variant="primary" onClick={nextSong} disabled={currentIndex >= songs.length - 1}>
+                      Següent →
+                    </Button>
+                  </div>
+
+                  <div className="mt-5 space-y-4">
+                    {currentCriteria.map((c) => (
+                      <div key={c.key} className="rounded-3xl border border-neutral-200 p-4">
+                        <div className="text-sm font-semibold">{c.label}</div>
+                        <div className="mt-3">
+                          <RatingButtons
+                            value={currentSong.ratings?.[c.key] ?? null}
+                            onChange={(v) => setRating(currentSong.id, c.key, v)}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          </>
+        ) : null}
+
+        {screen === "login" ? (
+          <>
+            <Header
+              title="Accés a configuració"
+              left={<Button onClick={() => setScreen("rate")}>Torna</Button>}
+              right={null}
+            />
+
+            <div className="flex-1 overflow-auto px-4 py-5">
+              <div className="text-sm text-neutral-700">Introdueix les credencials per modificar la llista de cançons.</div>
+
+              <div className="mt-5 space-y-3">
+                <div>
+                  <label className="text-xs font-semibold text-neutral-700">Usuari</label>
+                  <input
+                    value={user}
+                    onChange={(e) => setUser(String(e?.target?.value ?? ""))}
+                    className="mt-1 w-full h-12 rounded-2xl border border-neutral-300 px-4 outline-none focus:ring-2 focus:ring-neutral-200"
+                    placeholder="Usuari"
+                    autoComplete="username"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-neutral-700">Password</label>
+                  <input
+                    value={pass}
+                    onChange={(e) => setPass(String(e?.target?.value ?? ""))}
+                    type="password"
+                    className="mt-1 w-full h-12 rounded-2xl border border-neutral-300 px-4 outline-none focus:ring-2 focus:ring-neutral-200"
+                    placeholder="Password"
+                    autoComplete="current-password"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") doLogin();
+                    }}
+                  />
+                </div>
+
+                {authError ? (
+                  <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-800">{authError}</div>
+                ) : null}
+
+                <Button variant="primary" onClick={doLogin} disabled={!String(user ?? "").trim() || !String(pass ?? "")}>
+                  Entra
+                </Button>
+
+                <div className="text-xs text-neutral-500">
+                  Per aquesta demo: Usuari = <span className="font-semibold">admin</span> i Password = <span className="font-semibold">admin</span>.
+                </div>
+              </div>
+            </div>
+          </>
+        ) : null}
+
+        {screen === "config" ? (
+          <>
+            <Header
+              title="Configuració"
+              left={<Button onClick={() => setScreen("rate")}>Fet</Button>}
+              right={<Button onClick={clearAll}>Reinicia</Button>}
+            />
+
+            <div className="flex-1 overflow-auto px-4 py-4 space-y-4">
+              <div className="rounded-3xl border border-neutral-200 p-4">
+                <div className="text-xs text-neutral-600">Nom del concert</div>
+                <input
+                  value={concertName}
+                  onChange={(e) => setConcertName(e.target.value)}
+                  className="mt-1 w-full h-12 rounded-2xl border border-neutral-300 px-4 text-base font-semibold outline-none focus:ring-2 focus:ring-neutral-200"
+                />
+              </div>
+
+              <div className="rounded-3xl border border-neutral-200 p-4">
+                <div className="text-sm font-semibold">Afegir cançó</div>
+
+                <div className="mt-3 flex gap-2">
+                  <input
+                    value={newTitle}
+                    onChange={(e) => setNewTitle(e.target.value)}
+                    placeholder="Títol de la cançó…"
+                    className="h-12 flex-1 rounded-2xl border border-neutral-300 px-4 outline-none focus:ring-2 focus:ring-neutral-200"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") addSong();
+                    }}
+                  />
+                  <Button variant="primary" onClick={addSong} disabled={!newTitle.trim()}>
+                    Afegir
+                  </Button>
+                </div>
+
+                <div className="mt-3">
+                  <PillButton onClick={() => setNewHasSolist((v) => !v)} active={newHasSolist}>
+                    Té solista: {newHasSolist ? "Sí" : "No"}
+                  </PillButton>
+                </div>
+
+                <details className="mt-4 rounded-2xl border border-neutral-200 p-3">
+                  <summary className="cursor-pointer text-sm font-semibold">Enganxa una llista (1 per línia)</summary>
+                  <div className="mt-3">
+                    <textarea
+                      value={bulk}
+                      onChange={(e) => setBulk(e.target.value)}
+                      rows={5}
+                      placeholder={`Cançó 1
+Cançó 2
+Cançó 3`}
+                      className="w-full rounded-2xl border border-neutral-300 p-3 outline-none focus:ring-2 focus:ring-neutral-200"
+                    />
+                    <div className="mt-2 flex justify-end">
+                      <Button variant="primary" onClick={addBulk} disabled={!bulk.trim()}>
+                        Afegir llista
+                      </Button>
+                    </div>
+                    <div className="mt-2 text-xs text-neutral-500">
+                      Les cançons enganxades es creen sense solista. Pots activar-ho després a cada cançó.
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <div className="rounded-3xl border border-neutral-200 p-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold">Cançons ({songs.length})</div>
+                  <div className="text-xs text-neutral-600">Cançó actual: {songs.length ? currentIndex + 1 : 0}</div>
+                </div>
+
+                {songs.length ? (
+                  <div className="mt-3 space-y-2">
+                    {songs.map((s, i) => {
+                      const isCurrent = i === currentIndex;
+                      const cList = criteriaForSong(s);
+                      const a = avg(cList.map((c) => s.ratings?.[c.key]));
+                      return (
+                        <div
+                          key={s.id}
+                          className={
+                            "rounded-2xl border p-3 " +
+                            (isCurrent ? "border-black bg-neutral-50" : "border-neutral-200 bg-white")
+                          }
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setCurrentIndex(i)}
+                              className="text-left flex-1 min-w-0"
+                            >
+                              <div className="font-semibold truncate">{i + 1}. {s.title}</div>
+                              <div className="mt-1 flex items-center justify-between">
+                                <div className="text-xs text-neutral-600">Mitjana: {a == null ? "—" : a.toFixed(2)}</div>
+                                <div className="text-xs text-neutral-500">Toca per seleccionar</div>
+                              </div>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => removeSong(s.id)}
+                              className="h-11 w-11 rounded-2xl border border-neutral-300 bg-white"
+                              aria-label="Eliminar cançó"
+                              title="Eliminar"
+                            >
+                              ✕
+                            </button>
+                          </div>
+
+                          <div className="mt-2 flex items-center justify-between gap-2">
+                            <PillButton onClick={() => toggleHasSolist(s.id)} active={!!s.hasSolist}>
+                              Té solista: {s.hasSolist ? "Sí" : "No"}
+                            </PillButton>
+                            <div className="text-xs text-neutral-500">Criteris: {cList.length}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-sm text-neutral-600">No hi ha cançons. Afegeix-ne a dalt.</div>
+                )}
+              </div>
+
+              <div className="text-xs text-neutral-500">Dades guardades localment al dispositiu (localStorage).</div>
+            </div>
+          </>
+        ) : null}
+      </div>
+    </PhoneFrame>
+  );
+}
+
